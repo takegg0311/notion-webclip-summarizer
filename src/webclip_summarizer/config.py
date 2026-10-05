@@ -2,6 +2,7 @@
 
 import os
 from dataclasses import dataclass
+from pathlib import Path
 from zoneinfo import ZoneInfo
 
 
@@ -11,6 +12,7 @@ class Settings:
     database_id: str
     model: str
     data_source_id: str = ""
+    output_dir: Path | None = None
     timezone: str = "Asia/Tokyo"
     summary_property: str = "summary"
     tags_property: str = "tag"
@@ -52,11 +54,13 @@ class Settings:
 
     @classmethod
     def from_env(cls) -> "Settings":
+        output = os.getenv("MARKDOWN_OUTPUT_DIR", "").strip()
         return cls(
             notion_token=os.getenv("NOTION_TOKEN", ""),
             database_id=os.getenv("NOTION_DATABASE_ID", ""),
             model=os.getenv("LLM_MODEL", ""),
             data_source_id=os.getenv("NOTION_DATA_SOURCE_ID", ""),
+            output_dir=Path(output).expanduser() if output else None,
             timezone=os.getenv("TIMEZONE", "Asia/Tokyo"),
             summary_property=os.getenv("NOTION_SUMMARY_PROPERTY", "summary"),
             tags_property=os.getenv("NOTION_TAG_PROPERTY", "tag"),

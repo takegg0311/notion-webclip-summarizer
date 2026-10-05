@@ -1,11 +1,14 @@
 import json
+from datetime import datetime
 from types import SimpleNamespace
 from unittest.mock import Mock
 
 import httpx
 import pytest
+import yaml
 
 from webclip_summarizer.config import Settings
+from webclip_summarizer.export import format_filename_title, write_markdown
 from webclip_summarizer.llm import LlmClientImpl, Summary, parse_summary
 from webclip_summarizer.notion import NotionClientImpl
 from webclip_summarizer.service import SummarizerImpl
@@ -81,6 +84,26 @@ def test_llm_retries_invalid_json(settings, result):
     assert completion.call_count == 2
 
 
+def test_markdown_frontmatter_and_collision(tmp_path, result):
+    created = datetime.fromisoformat("2026-10-06T01:23:00+09:00")
+    path = write_markdown(tmp_path, page(), "a: b", "body", result, created, "2026-10-06", "url")
+    assert path.name == "20261006_0123_記事.md"
+    metadata = yaml.safe_load(path.read_text().split("---", 2)[1])
+    assert metadata["tags"] == result.tags
+    assert metadata["title"] == "a: b"
+    write_markdown(tmp_path, page(), "a: b", "body2", result, created, "now", "url")
+    with pytest.raises(FileExistsError):
+        write_markdown(tmp_path, page("other"), "t", "body", result, created, "now", "url")
+    assert "body2" in path.read_text()
+
+
+def test_filename_cannot_escape_directory():
+    assert "/" not in format_filename_title("../../a/b: c")
+    assert format_filename_title("Hello World") == "Hello_World"
+    assert format_filename_title("日本 語") == "日本語"
+    assert len(format_filename_title("あ" * 100)) == 60
+
+
 def test_page_failure_isolated_and_not_marked(settings, result):
     notion = Mock()
     notion.query_pages.side_effect = [[page()], [page("failed"), page("ok")]]
@@ -90,6 +113,20 @@ def test_page_failure_isolated_and_not_marked(settings, result):
     assert SummarizerImpl(settings, notion, llm).run() == 1
     assert notion.update_summary.call_count == 1
     assert notion.update_summary.call_args.args[0] == "ok"
+
+
+def test_export_failure_does_not_stop_notion(settings, result, tmp_path):
+    from dataclasses import replace
+
+    output = tmp_path / "file"
+    output.write_text("not a directory")
+    notion = Mock()
+    notion.query_pages.side_effect = [[], [page(), page("p2")]]
+    notion.read_body.return_value = "body"
+    llm = Mock()
+    llm.summarize.return_value = result
+    assert SummarizerImpl(replace(settings, output_dir=output), notion, llm).run() == 2
+    assert notion.update_summary.call_count == 2
 
 
 def test_paginated_query_and_recursive_blocks(settings):
@@ -173,6 +210,26 @@ def test_retry_rate_limit_then_success(settings, monkeypatch):
     assert len(calls) == 2
     assert 2 in sleeps
     assert calls[0].headers["Notion-Version"] == "2025-09-03"
+
+
+def test_export_only_uses_stored_summary(settings, result, tmp_path):
+    from dataclasses import replace
+
+    completed = page()
+    completed["properties"]["summary"] = {
+        "type": "rich_text",
+        "rich_text": [{"plain_text": "stored"}],
+    }
+    completed["properties"]["summary_time"] = {"type": "date", "date": {"start": "2026-10-06"}}
+    notion = Mock()
+    notion.query_pages.return_value = [completed]
+    notion.read_body.return_value = "original body"
+    llm = Mock()
+    llm.format_title.return_value = "記事"
+    assert SummarizerImpl(replace(settings, output_dir=tmp_path), notion, llm).run(True) == 0
+    llm.summarize.assert_not_called()
+    notion.update_summary.assert_not_called()
+    assert "stored" in (tmp_path / "20261006_0123_記事.md").read_text()
 
 
 def test_litellm_openrouter_429_retries_real_transport(monkeypatch, result):

@@ -14,6 +14,7 @@ from .service import SummarizerImpl
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize pending Notion web clips")
+    parser.add_argument("--export-only", action="store_true", help="Re-export completed pages")
     parser.add_argument("--limit", type=int, help="Maximum pages per run")
     args = parser.parse_args()
     if args.limit is not None and args.limit < 1:
@@ -25,7 +26,7 @@ def main() -> None:
         with httpx.Client(timeout=60) as client:
             failures = SummarizerImpl(
                 settings, NotionClientImpl(settings, client), LlmClientImpl(settings)
-            ).run(limit=args.limit)
+            ).run(args.export_only, args.limit)
         raise SystemExit(1 if failures else 0)
     except Exception:
         logging.getLogger(__name__).exception("Batch initialization failed")
