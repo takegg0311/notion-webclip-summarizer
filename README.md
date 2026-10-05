@@ -62,6 +62,52 @@ uv run webclip-summarizer --export-only
 
 同じページのファイルはアトミックに置換します。同一分・同一タイトルの別ページは上書きせず、衝突として報告します。タイトルのLLM整形結果は変わる可能性があるため、再出力時に別名ファイルができる場合があります。ファイル名の規則を維持するため、衝突時の自動ID付加は行いません。
 
+## Docker・ローカル定期実行
+
+```sh
+docker compose build
+# Notion更新のみ: .env の MARKDOWN_OUTPUT_DIR は空
+# Markdownも出す: .env に MARKDOWN_OUTPUT_DIR=/output を設定
+mkdir -p output
+docker compose run --rm summarizer
+```
+
+`HOST_OUTPUT_DIR` でホスト側の出力先を指定できます。コンテナはUID 10001で実行するため、Linuxではマウント先の書き込み権限を用意してください。コンテナにAPIキーをコピーせず、実行時の環境変数で渡します。
+
+cronで毎時実行する例（パスとDockerのパスは環境に合わせて変更）：
+
+```cron
+0 * * * * cd /path/to/notion-webclip-summarizer && /usr/local/bin/docker compose run --rm summarizer >> /path/to/webclip.log 2>&1
+```
+
+実行の重複を避けてください。バッチ間の分散ロックは実装していないため、同時実行すると同じ記事の要約費用が重複する可能性があります。ローカルでは `flock` 等、クラウドでは実行時間より長い間隔を設定してください。終了コードは全成功/対象なしで0、記事・出力・初期化の失敗で1です。
+
+## Cloud Run Jobs
+
+[Cloud Run JobsとCloud Scheduler](https://cloud.google.com/run/docs/execute/jobs-on-schedule)で定期実行できます。クラウドでは `MARKDOWN_OUTPUT_DIR` を空にします。
+
+1. Cloud Run・Cloud Build・Artifact Registry・Secret Manager・Cloud Scheduler APIを有効化し、Artifact RegistryのDockerリポジトリを作成します。
+2. Job用・Scheduler用サービスアカウントを作成します。Job用アカウントには利用するシークレットの `roles/secretmanager.secretAccessor` を付与します。
+3. `notion-token` とLLMキー用のSecret Managerシークレットを作成します。
+4. デプロイするユーザーにはビルド・Job作成・Scheduler作成・サービスアカウント利用に必要な権限を付与します。
+5. 次の環境変数を設定し、リポジトリルートからスクリプトを実行します。
+
+```sh
+export PROJECT_ID=your-project
+export REGION=asia-northeast1
+export IMAGE="$REGION-docker.pkg.dev/$PROJECT_ID/your-repository/webclip-summarizer:latest"
+export JOB_SERVICE_ACCOUNT="webclip-job@$PROJECT_ID.iam.gserviceaccount.com"
+export SCHEDULER_SERVICE_ACCOUNT="webclip-scheduler@$PROJECT_ID.iam.gserviceaccount.com"
+export NOTION_DATABASE_ID=your-database-id
+export LLM_MODEL=gemini/gemini-2.5-flash
+export LLM_KEY_ENV=GEMINI_API_KEY
+export LLM_SECRET=gemini-api-key
+# 任意: NOTION_DATA_SOURCE_ID, JOB_NAME, SCHEDULE (標準: 毎時)
+./deploy/cloud_run.sh
+```
+
+スクリプトはイメージをビルドし、単一タスクのJobとOAuth認証のSchedulerを作成します。SchedulerアカウントへJob単位の `roles/run.invoker` を付与します。Job全体の自動リトライは無効にし、失敗記事は次回スケジュールで再処理します。Scheduler作成は初回用です。既存のSchedulerを変更する場合は `gcloud scheduler jobs update http` を使ってください。クラウドへの実デプロイは利用者のプロジェクトで行ってください。
+
 ## 開発・検証
 
 ```sh
