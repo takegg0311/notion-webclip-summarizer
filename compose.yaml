@@ -1,0 +1,6 @@
+services:
+  summarizer:
+    build: .
+    env_file: .env
+    volumes:
+      - ${HOST_OUTPUT_DIR:-./output}:/output
