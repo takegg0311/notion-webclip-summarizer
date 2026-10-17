@@ -6,6 +6,8 @@ Notion Web Clipperの未要約記事を日本語で要約し、関連タグ5つ�
 
 Python 3.11以上と[uv](https://docs.astral.sh/uv/)を使用します。
 
+WindowsなどOSにIANAタイムゾーンデータがない環境でも動作するよう、`tzdata` を依存関係に含めています。`No time zone found with key Asia/Tokyo` が発生した既存環境では、更新後に `uv sync --frozen` を実行してください。
+
 ```sh
 cp .env.example .env
 uv sync --frozen
