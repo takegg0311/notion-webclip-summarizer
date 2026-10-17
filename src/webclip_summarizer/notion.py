@@ -1,5 +1,6 @@
 """Notion transport and recursive block rendering."""
 
+import logging
 import time
 from collections.abc import Iterator
 from typing import Any
@@ -7,6 +8,8 @@ from typing import Any
 import httpx
 
 from .config import Settings
+
+LOGGER = logging.getLogger(__name__)
 
 NOTION_VERSION = "2025-09-03"
 MAX_ATTEMPTS = 5
@@ -76,6 +79,7 @@ class NotionClientImpl:
     ) -> Iterator[dict[str, Any]]:
         cursor = None
         count = 0
+        warned_incomplete = False
         while True:
             payload: dict[str, Any] = {
                 "filter": filter_value,
@@ -85,6 +89,10 @@ class NotionClientImpl:
             if cursor:
                 payload["start_cursor"] = cursor
             result = self.request("POST", f"data_sources/{self.source_id}/query", json=payload)
+            status = result.get("request_status", {})
+            if status.get("type") == "incomplete" and not warned_incomplete:
+                LOGGER.warning("Notion query incomplete: %s", status.get("incomplete_reason"))
+                warned_incomplete = True
             for page in result["results"]:
                 if page.get("object") != "page":
                     continue
