@@ -1,14 +1,21 @@
 import json
+from dataclasses import replace
 from datetime import datetime
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, call
 
 import httpx
 import pytest
 import yaml
 
 from webclip_summarizer.config import Settings
-from webclip_summarizer.export import format_filename_title, write_markdown
+from webclip_summarizer.export import (
+    build_prefix_index,
+    format_filename_title,
+    is_exported,
+    read_notion_id,
+    write_markdown,
+)
 from webclip_summarizer.llm import LlmClientImpl, Summary, parse_summary
 from webclip_summarizer.notion import NotionClientImpl
 from webclip_summarizer.service import SummarizerImpl
@@ -116,8 +123,6 @@ def test_page_failure_isolated_and_not_marked(settings, result):
 
 
 def test_export_failure_does_not_stop_notion(settings, result, tmp_path):
-    from dataclasses import replace
-
     output = tmp_path / "file"
     output.write_text("not a directory")
     notion = Mock()
@@ -125,8 +130,9 @@ def test_export_failure_does_not_stop_notion(settings, result, tmp_path):
     notion.read_body.return_value = "body"
     llm = Mock()
     llm.summarize.return_value = result
-    assert SummarizerImpl(replace(settings, output_dir=output), notion, llm).run() == 2
+    assert SummarizerImpl(replace(settings, output_dir=output), notion, llm).run() == 3
     assert notion.update_summary.call_count == 2
+    assert notion.query_pages.call_count == 2
 
 
 def test_paginated_query_and_recursive_blocks(settings):
@@ -213,8 +219,6 @@ def test_retry_rate_limit_then_success(settings, monkeypatch):
 
 
 def test_export_only_uses_stored_summary(settings, result, tmp_path):
-    from dataclasses import replace
-
     completed = page()
     completed["properties"]["summary"] = {
         "type": "rich_text",
@@ -340,3 +344,314 @@ def test_explicit_token_and_effort_settings():
     LlmClientImpl(settings, completion).format_title("title")
     assert completion.call_args.kwargs["max_tokens"] == 4000
     assert completion.call_args.kwargs["extra_body"]["reasoning"]["effort"] == "low"
+
+
+def completed_page(identifier="saved"):
+    completed = page(identifier)
+    completed["properties"]["summary"] = {
+        "type": "rich_text",
+        "rich_text": [{"plain_text": "stored summary"}],
+    }
+    completed["properties"]["summary_time"] = {
+        "type": "date",
+        "date": {"start": "2026-10-06T02:00:00+09:00"},
+    }
+    return completed
+
+
+def catchup_service(settings, output, completed, pending=()):
+    notion = Mock()
+    notion.query_pages.side_effect = [[], list(pending), completed]
+    notion.read_body.return_value = "original body"
+    llm = Mock()
+    llm.format_title.return_value = "整形タイトル"
+    return SummarizerImpl(replace(settings, output_dir=output), notion, llm)
+
+
+def test_catchup_exports_saved_properties_to_missing_directory(settings, tmp_path, caplog):
+    output = tmp_path / "missing"
+    service = catchup_service(settings, output, [completed_page()])
+    with caplog.at_level("INFO"):
+        assert service.run() == 0
+    path = output / "20261006_0123_整形タイトル.md"
+    metadata = yaml.safe_load(path.read_text().split("---\n", 2)[1])
+    assert metadata["summary"] == "stored summary"
+    assert metadata["tags"] == ["Python"]
+    assert metadata["summary_time"] == "2026-10-06T02:00:00+09:00"
+    assert metadata["source"] == "https://example.com"
+    assert metadata["created"] == "2026-10-06T01:23:00+09:00"
+    assert "original body" in path.read_text()
+    service.llm.summarize.assert_not_called()
+    service.notion.update_summary.assert_not_called()
+    service.llm.format_title.assert_called_once_with("記事 - サイト")
+    service.notion.query_pages.assert_called_with(
+        {"property": "summary_time", "date": {"is_not_empty": True}}, "descending"
+    )
+    assert "catchup_checked=1 catchup_exported=1 catchup_skipped=0" in caplog.text
+
+
+def test_catchup_skips_matching_id_with_different_title(settings, tmp_path, monkeypatch):
+    existing = tmp_path / "20261006_0123_別タイトル.md"
+    existing.write_text("---\nnotion_id: saved\n---\nunchanged")
+    writer = Mock()
+    monkeypatch.setattr("webclip_summarizer.service.write_markdown", writer)
+    service = catchup_service(settings, tmp_path, [completed_page()])
+    assert service.run() == 0
+    service.notion.read_body.assert_not_called()
+    service.llm.format_title.assert_not_called()
+    writer.assert_not_called()
+    assert existing.read_text().endswith("unchanged")
+
+
+def test_catchup_does_not_skip_other_id_in_same_minute(settings, tmp_path):
+    existing = tmp_path / "20261006_0123_別タイトル.md"
+    existing.write_text("---\nnotion_id: other\n---\n")
+    service = catchup_service(settings, tmp_path, [completed_page()])
+    assert service.run() == 0
+    assert (tmp_path / "20261006_0123_整形タイトル.md").exists()
+    assert read_notion_id(existing) == "other"
+
+
+def test_no_catchup_query_without_output(settings):
+    service = catchup_service(settings, None, [completed_page()])
+    assert service.run() == 0
+    assert service.notion.query_pages.call_count == 2
+    service.llm.format_title.assert_not_called()
+
+
+def test_export_only_forces_overwrite_without_catchup(settings, tmp_path):
+    existing = tmp_path / "20261006_0123_整形タイトル.md"
+    existing.write_text("---\nnotion_id: saved\n---\nold")
+    notion = Mock()
+    notion.query_pages.return_value = [completed_page()]
+    notion.read_body.return_value = "new body"
+    llm = Mock()
+    llm.format_title.return_value = "整形タイトル"
+    assert SummarizerImpl(replace(settings, output_dir=tmp_path), notion, llm).run(True) == 0
+    notion.query_pages.assert_called_once_with(
+        {"property": "summary_time", "date": {"is_not_empty": True}}, limit=None
+    )
+    notion.update_summary.assert_not_called()
+    llm.summarize.assert_not_called()
+    llm.format_title.assert_called_once()
+    assert "new body" in existing.read_text()
+
+
+@pytest.mark.parametrize("failure_stage", ["summarize", "write"])
+def test_catchup_excludes_all_pending_ids(settings, tmp_path, result, monkeypatch, failure_stage):
+    service = catchup_service(settings, tmp_path, [completed_page("p1")], [page()])
+    service.llm.summarize.return_value = result
+    writer = Mock()
+    monkeypatch.setattr("webclip_summarizer.service.write_markdown", writer)
+    if failure_stage == "write":
+        writer.side_effect = OSError("write failed")
+    else:
+        service.llm.summarize.side_effect = ValueError("summarize failed")
+    assert service.run() == 1
+    assert writer.call_count == (1 if failure_stage == "write" else 0)
+    service.notion.read_body.assert_called_once_with("p1")
+    service.llm.format_title.assert_not_called()
+
+
+def test_catchup_limit_is_separate_and_skips_do_not_consume_it(settings, tmp_path, result):
+    (tmp_path / "20261006_0123_既存.md").write_text("---\nnotion_id: existing\n---\n")
+    service = catchup_service(
+        settings,
+        tmp_path,
+        [
+            completed_page("p1"),
+            completed_page("existing"),
+            completed_page("first"),
+            completed_page("second"),
+        ],
+        [page()],
+    )
+    service.llm.summarize.return_value = result
+    assert service.run(limit=1) == 0
+    service.notion.query_pages.assert_any_call(
+        {"property": "summary_time", "date": {"is_empty": True}}, limit=1
+    )
+    service.notion.query_pages.assert_called_with(
+        {"property": "summary_time", "date": {"is_not_empty": True}}, "descending"
+    )
+    service.notion.update_summary.assert_called_once()
+    assert service.notion.read_body.call_args_list == [call("p1"), call("first")]
+    service.llm.format_title.assert_called_once()
+    assert read_notion_id(tmp_path / "20261006_0123_整形タイトル.md") == "first"
+
+
+@pytest.mark.parametrize("stage", ["body", "title", "write", "collision"])
+def test_catchup_page_failure_isolated(settings, tmp_path, monkeypatch, stage):
+    service = catchup_service(settings, tmp_path, [completed_page("bad"), completed_page("ok")])
+    if stage == "body":
+        service.notion.read_body.side_effect = [OSError("body failed"), "body"]
+    elif stage == "title":
+        service.llm.format_title.side_effect = [ValueError("title failed"), "整形タイトル"]
+    elif stage == "write":
+        writer = Mock(side_effect=[OSError("disk full"), None])
+        monkeypatch.setattr("webclip_summarizer.service.write_markdown", writer)
+    else:
+        (tmp_path / "20261006_0123_衝突.md").write_text("---\nnotion_id: other\n---\n")
+        service.llm.format_title.side_effect = ["衝突", "整形タイトル"]
+    assert service.run() == 1
+    assert service.notion.read_body.call_args_list == [call("bad"), call("ok")]
+    if stage == "write":
+        assert writer.call_count == 2
+    else:
+        assert read_notion_id(tmp_path / "20261006_0123_整形タイトル.md") == "ok"
+
+
+def test_catchup_failed_attempt_consumes_limit(settings, tmp_path):
+    service = catchup_service(settings, tmp_path, [completed_page("bad"), completed_page("later")])
+    service.llm.format_title.side_effect = ValueError("title failed")
+    assert service.run(limit=1) == 1
+    service.notion.read_body.assert_called_once_with("bad")
+    service.llm.format_title.assert_called_once()
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("yield_first", [False, True])
+def test_catchup_query_failure_has_no_partial_exports(
+    settings, tmp_path, result, monkeypatch, yield_first, caplog
+):
+    def broken_pages():
+        if yield_first:
+            yield completed_page()
+        raise OSError("listing failed")
+
+    service = catchup_service(settings, tmp_path, broken_pages(), [page()])
+    service.llm.summarize.return_value = result
+    writer = Mock()
+    monkeypatch.setattr("webclip_summarizer.service.write_markdown", writer)
+    with caplog.at_level("INFO"):
+        assert service.run() == 1
+    service.notion.update_summary.assert_called_once()
+    service.notion.read_body.assert_called_once_with("p1")
+    service.llm.format_title.assert_not_called()
+    writer.assert_called_once()
+    assert "Batch finished: pages=1 failures=1" in caplog.text
+
+
+def test_catchup_unreadable_index_stops_before_query(settings, tmp_path, monkeypatch):
+    def denied(path):
+        raise PermissionError("directory unreadable")
+
+    monkeypatch.setattr("webclip_summarizer.export.os.scandir", denied)
+    service = catchup_service(settings, tmp_path, [completed_page()])
+    assert service.run() == 1
+    assert service.notion.query_pages.call_count == 2
+    service.notion.read_body.assert_not_called()
+    service.llm.format_title.assert_not_called()
+
+
+@pytest.mark.parametrize("valid_first", [False, True])
+def test_frontmatter_candidates_ignore_bad_yaml_in_any_order(tmp_path, valid_first):
+    good = tmp_path / "20261006_0123_good.md"
+    bad = tmp_path / "20261006_0123_bad.md"
+    good.write_text("---\nnotion_id: p1\n---\n")
+    bad.write_text("---\ninvalid: [\n---\n")
+    paths = [good, bad] if valid_first else [bad, good]
+    created = datetime.fromisoformat("2026-10-06T01:23:00+09:00")
+    assert is_exported({"20261006_0123_": paths}, created, "p1")
+    assert not is_exported({"20261006_0123_": [bad]}, created, "p1")
+
+
+@pytest.mark.parametrize(
+    "content",
+    [
+        b"no frontmatter",
+        b"---\ninvalid: [\n---\n",
+        b"---\n- list\n---\n",
+        b"---\ntitle: missing id\n---\n",
+        b"---\nnotion_id: p1\n",
+        b"---\n\xff\n---\n",
+    ],
+)
+def test_unusable_frontmatter_does_not_match_or_allow_overwrite(tmp_path, result, content):
+    path = tmp_path / "20261006_0123_記事.md"
+    path.write_bytes(content)
+    assert read_notion_id(path) is None
+    with pytest.raises(FileExistsError):
+        write_markdown(
+            tmp_path,
+            page(),
+            "title",
+            "body",
+            result,
+            datetime.fromisoformat("2026-10-06T01:23:00+09:00"),
+            "now",
+            "url",
+        )
+    assert path.read_bytes() == content
+
+
+def test_missing_or_unreadable_frontmatter_is_ignored(tmp_path, monkeypatch):
+    assert read_notion_id(tmp_path / "missing") is None
+    path = tmp_path / "unreadable.md"
+    path.write_text("---\nnotion_id: p1\n---\n")
+
+    def denied(*args, **kwargs):
+        raise PermissionError("unreadable")
+
+    monkeypatch.setattr(type(path), "open", denied)
+    assert read_notion_id(path) is None
+
+
+def test_dash_in_title_supports_catchup_detection_and_overwrite(settings, tmp_path, result):
+    created = datetime.fromisoformat("2026-10-06T01:23:00+09:00")
+    path = write_markdown(
+        tmp_path, completed_page(), "記事---サイト", "body", result, created, "now", "url"
+    )
+    service = catchup_service(settings, tmp_path, [completed_page()])
+    assert service.run() == 0
+    service.notion.read_body.assert_not_called()
+    service.llm.format_title.assert_not_called()
+    write_markdown(
+        tmp_path, completed_page(), "記事---サイト", "new body", result, created, "now", "url"
+    )
+    assert "new body" in path.read_text()
+
+
+def test_prefix_index_scans_once_and_ignores_temporary_files(tmp_path, monkeypatch):
+    (tmp_path / "20261006_0123_article.md").write_text("---\nnotion_id: p1\n---\n")
+    (tmp_path / ".webclip-temp.md").write_text("temporary")
+    (tmp_path / "20261006_0123_other.txt").write_text("text")
+    (tmp_path / "20261006_0123_directory.md").mkdir()
+    import os
+
+    scanner = Mock(wraps=os.scandir)
+    monkeypatch.setattr("webclip_summarizer.export.os.scandir", scanner)
+    index = build_prefix_index(tmp_path)
+    created = datetime.fromisoformat("2026-10-06T01:23:00+09:00")
+    assert is_exported(index, created, "p1")
+    assert not is_exported(index, created, "other")
+    assert list(index) == ["20261006_0123_"]
+    assert len(index["20261006_0123_"]) == 1
+    scanner.assert_called_once_with(tmp_path)
+
+
+def test_incomplete_query_warns_once_and_returns_pages(settings, caplog, monkeypatch):
+    monkeypatch.setattr("webclip_summarizer.notion.time.sleep", lambda _: None)
+
+    def handler(request):
+        second = "start_cursor" in json.loads(request.content)
+        return httpx.Response(
+            200,
+            json={
+                "results": [page("p2" if second else "p1")],
+                "has_more": not second,
+                "next_cursor": "next",
+                "request_status": {
+                    "type": "incomplete",
+                    "incomplete_reason": "query_limit_reached",
+                },
+            },
+        )
+
+    with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+        notion = NotionClientImpl(settings, client)
+        notion.source_id = "source"
+        assert [p["id"] for p in notion.query_pages({})] == ["p1", "p2"]
+    warnings = [record for record in caplog.records if "Notion query incomplete" in record.message]
+    assert len(warnings) == 1
+    assert "query_limit_reached" in warnings[0].message
