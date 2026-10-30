@@ -39,6 +39,11 @@ DBには次のプロパティを作成してください。既存のプロパテ
 | Gemini | `gemini/<model>` | GEMINI_API_KEY |
 | Grok | `xai/<model>` | XAI_API_KEY |
 | OpenRouter | `openrouter/<provider>/<model>` | OPENROUTER_API_KEY |
+| OpenAI互換 | `openai_compatible/<model>` | OPENAI_COMPATIBLE_API_KEY（任意） |
+
+`openai_compatible/` を使うときは `OPENAI_COMPATIBLE_BASE_URL` に **`/chat/completions` を含まないベースURL**（例: `http://host:8000/v1`）を設定してください。SDK が `chat/completions` を連結します。末尾まで書くとパスが二重になります。
+
+LiteLLM はモデル名に `gpt-5` または `gpt-6` を含む場合、`max_tokens` を `max_completion_tokens` へ書き換えてから送信します。互換サーバーが後者を解釈しないと、出力長が意図どおり制限されないことがあります。
 
 本文・候補タグはLLMへ送信します。直近100件のタグ付き記事を参照し、頻度順の候補（最大300タグ）から意味の近いタグを優先選択するよう指示します。要約は300〜400文字を目安に「主題・結論／根拠・具体例／示唆・注意点」の3項目で生成します。短い記事では事実を水増しせず、目安より短い要約を許容します。タグは日本語・英語や略語の違いも含めて同義・類似の既存タグを優先し、新規タグは日本語を基本にします。既存の英語タグや固有名詞の表記は維持します。文字数や意味的な同義性はプロンプトによる指示で、厳密な保証ではありません。同義性の判断はLLMが行い、表記差はプログラムで既存タグへ統一します。1回の実行で作成したタグも次の記事の候補に追加します。`RECENT_ARTICLE_COUNT` で参照件数を変更できます。
 
@@ -117,6 +122,20 @@ export LLM_SECRET=gemini-api-key
 # 任意: NOTION_DATA_SOURCE_ID, JOB_NAME, SCHEDULE (標準: 毎時)
 ./deploy/cloud_run.sh
 ```
+
+OpenAI互換エンドポイントを使う例:
+
+```sh
+export LLM_MODEL=openai_compatible/your-model-id
+export OPENAI_COMPATIBLE_BASE_URL=http://your-gateway:8000/v1
+export LLM_KEY_ENV=OPENAI_COMPATIBLE_API_KEY
+export LLM_SECRET=openai-compatible-api-key
+./deploy/cloud_run.sh
+```
+
+- `OPENAI_COMPATIBLE_BASE_URL` は `/chat/completions` を含まないベースURLにしてください（例: `http://host:8000/v1`）。
+- キーを使う場合は Secret Manager に `OPENAI_COMPATIBLE_API_KEY` 用の値を入れ、`LLM_KEY_ENV=OPENAI_COMPATIBLE_API_KEY` を指定します。
+- キーを検証しないサーバーでも `LLM_KEY_ENV` と `LLM_SECRET` は必須です。Secret に任意の非空文字列を入れ、`LLM_KEY_ENV=OPENAI_COMPATIBLE_API_KEY` を指定してください（サーバーはその値を無視できます）。
 
 スクリプトはイメージをビルドし、単一タスクのJobとOAuth認証のSchedulerを作成します。SchedulerアカウントへJob単位の `roles/run.invoker` を付与します。Job全体の自動リトライは無効にし、失敗記事は次回スケジュールで再処理します。Scheduler作成は初回用です。既存のSchedulerを変更する場合は `gcloud scheduler jobs update http` を使ってください。クラウドへの実デプロイは利用者のプロジェクトで行ってください。
 
