@@ -21,6 +21,8 @@ class Settings:
     chunk_chars: int = 12000
     max_tokens: int = 8192
     reasoning_effort: str = ""
+    openai_compatible_base_url: str = ""
+    openai_compatible_api_key: str = ""
 
     def __post_init__(self) -> None:
         if not self.notion_token or not self.database_id or not self.model:
@@ -41,8 +43,22 @@ class Settings:
         ):
             raise ValueError("Invalid LLM_REASONING_EFFORT")
         ZoneInfo(self.timezone)
-        if not self.model.startswith(("openai/", "anthropic/", "gemini/", "xai/", "openrouter/")):
+        if not self.model.startswith(
+            (
+                "openai/",
+                "anthropic/",
+                "gemini/",
+                "xai/",
+                "openrouter/",
+                "openai_compatible/",
+            )
+        ):
             raise ValueError("LLM_MODEL must include a supported provider prefix")
+
+        if self.model.startswith("openai_compatible/") and not self.openai_compatible_base_url:
+            raise ValueError(
+                "OPENAI_COMPATIBLE_BASE_URL is required when LLM_MODEL uses openai_compatible/"
+            )
 
         if self.model.startswith("openrouter/") and self.model.endswith(":batch"):
             raise ValueError(
@@ -69,4 +85,6 @@ class Settings:
             chunk_chars=int(os.getenv("LLM_CHUNK_CHARS", "12000")),
             max_tokens=int(os.getenv("LLM_MAX_TOKENS", "8192")),
             reasoning_effort=os.getenv("LLM_REASONING_EFFORT", "").strip(),
+            openai_compatible_base_url=os.getenv("OPENAI_COMPATIBLE_BASE_URL", "").strip(),
+            openai_compatible_api_key=os.getenv("OPENAI_COMPATIBLE_API_KEY", "").strip(),
         )

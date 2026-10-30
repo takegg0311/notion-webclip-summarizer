@@ -291,6 +291,102 @@ def test_batch_model_rejected_before_api_call():
         Settings("t", "db", "openrouter/openai/gpt-5-nano:batch")
 
 
+def test_unprefixed_model_rejected():
+    with pytest.raises(ValueError, match="supported provider prefix"):
+        Settings("t", "db", "local-model")
+
+
+def test_openai_compatible_requires_base_url():
+    with pytest.raises(ValueError, match="OPENAI_COMPATIBLE_BASE_URL"):
+        Settings("t", "db", "openai_compatible/test-model")
+
+
+def test_openai_compatible_accepts_with_base_url():
+    settings = Settings(
+        "t",
+        "db",
+        "openai_compatible/test-model",
+        openai_compatible_base_url="http://example.invalid/v1",
+    )
+    assert settings.model == "openai_compatible/test-model"
+
+
+def test_from_env_reads_openai_compatible_settings(monkeypatch):
+    monkeypatch.setenv("NOTION_TOKEN", "token")
+    monkeypatch.setenv("NOTION_DATABASE_ID", "db")
+    monkeypatch.setenv("LLM_MODEL", "openai_compatible/test-model")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_BASE_URL", "  http://host/v1  ")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_API_KEY", "  sk-test  ")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    loaded = Settings.from_env()
+    assert loaded.openai_compatible_base_url == "http://host/v1"
+    assert loaded.openai_compatible_api_key == "sk-test"
+
+
+def test_openai_compatible_routes_to_litellm(result):
+    settings = Settings(
+        "t",
+        "db",
+        "openai_compatible/test-model",
+        openai_compatible_base_url="http://example.invalid/v1",
+    )
+    completion = Mock(return_value=response(json.dumps(result.__dict__)))
+    LlmClientImpl(settings, completion).summarize("title", "body", [])
+    assert completion.call_args.kwargs["model"] == "openai/test-model"
+    assert completion.call_args.kwargs["api_base"] == "http://example.invalid/v1"
+    assert completion.call_args.kwargs["api_key"] == "openai-compatible-unused"
+
+
+def test_openai_compatible_passes_configured_api_key(result):
+    settings = Settings(
+        "t",
+        "db",
+        "openai_compatible/test-model",
+        openai_compatible_base_url="http://example.invalid/v1",
+        openai_compatible_api_key="sk-test",
+    )
+    completion = Mock(return_value=response(json.dumps(result.__dict__)))
+    LlmClientImpl(settings, completion).summarize("title", "body", [])
+    assert completion.call_args.kwargs["api_key"] == "sk-test"
+
+
+def test_openai_compatible_dummy_key_not_openai_env(result, monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-from-env")
+    settings = Settings(
+        "t",
+        "db",
+        "openai_compatible/test-model",
+        openai_compatible_base_url="http://example.invalid/v1",
+    )
+    completion = Mock(return_value=response(json.dumps(result.__dict__)))
+    LlmClientImpl(settings, completion).summarize("title", "body", [])
+    api_key = completion.call_args.kwargs["api_key"]
+    assert api_key
+    assert api_key != "sk-from-env"
+
+
+@pytest.mark.parametrize(
+    "model",
+    [
+        "gemini/gemini-2.5-flash",
+        "openai/gpt-4o",
+        "openrouter/openai/gpt-5-nano",
+    ],
+)
+def test_non_compatible_models_do_not_pass_api_base(model, result):
+    settings = Settings(
+        "t",
+        "db",
+        model,
+        openai_compatible_base_url="http://example.invalid/v1",
+        openai_compatible_api_key="sk-should-not-appear",
+    )
+    completion = Mock(return_value=response(json.dumps(result.__dict__)))
+    LlmClientImpl(settings, completion).summarize("title", "body", [])
+    assert "api_base" not in completion.call_args.kwargs
+    assert "api_key" not in completion.call_args.kwargs
+
+
 def test_standard_openrouter_model_accepted():
     assert (
         Settings("t", "db", "openrouter/openai/gpt-5-nano").model == "openrouter/openai/gpt-5-nano"
