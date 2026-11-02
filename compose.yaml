@@ -4,3 +4,16 @@ services:
     env_file: .env
     volumes:
       - ${HOST_OUTPUT_DIR:-./output}:/output
+
+  ofelia:
+    image: mcuadros/ofelia:0.3.22
+    command: daemon --docker -f label=com.docker.compose.project=${COMPOSE_PROJECT_NAME}
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    restart: unless-stopped
+    environment:
+      TZ: ${TIMEZONE:-Asia/Tokyo}
+    labels:
+      ofelia.job-run.summarizer.schedule: "${OFELIA_SCHEDULE:-@hourly}"
+      ofelia.job-run.summarizer.container: "${COMPOSE_PROJECT_NAME}-summarizer-1"
+      ofelia.job-run.summarizer.no-overlap: "true"

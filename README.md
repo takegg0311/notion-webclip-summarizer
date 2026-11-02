@@ -67,7 +67,7 @@ LiteLLM はモデル名に `gpt-5` または `gpt-6` を含む場合、`max_toke
 
 補完は要約済み記事を毎回新しい順に確認します。Notionのクエリ上限で一覧が打ち切られた場合は警告を記録し、古い記事が対象外になることがあります。`--limit N` は通常の要約と補完それぞれに適用され、最大N件ずつ処理します。補完の上限には出力を試みた記事（失敗を含む）だけを数え、出力済みなどでスキップした記事は数えません。失敗し続ける記事が新しい側にあると、毎回上限を消費して古い未出力記事が進まないため、ログのページIDから原因を解消してください。
 
-初めて `MARKDOWN_OUTPUT_DIR` を設定したときや出力先を空にしたときは、要約済みの全記事が1回の実行で補完対象になります。記事数ぶんの本文取得と `format_title` のLLM呼び出しが発生するため、必要なら `--limit` で分割してください。後述のcron例を含め、`--limit` を指定しない実行では補完件数の上限はありません。
+初めて `MARKDOWN_OUTPUT_DIR` を設定したときや出力先を空にしたときは、要約済みの全記事が1回の実行で補完対象になります。記事数ぶんの本文取得と `format_title` のLLM呼び出しが発生するため、必要なら `--limit` で分割してください。後述の Ofelia による定期実行を含め、`--limit` を付けないバッチでは補完件数の上限はありません。
 
 出力失敗でもNotionの更新は完了させ、終了コード1を返します。失敗したMarkdownは次回の通常実行で自動補完されます（同じ実行内では再試行しません）。補完中の失敗も記事単位で記録してほかの記事を続けます。全件を強制的に上書きし直したい場合は、次のコマンドを使います（Notionは更新せず、全対象記事の本文取得とタイトル整形のLLM呼び出しを行います）。
 
@@ -79,17 +79,46 @@ uv run webclip-summarizer --export-only
 
 ## Docker・ローカル定期実行
 
+`.env.example` を `.env` にコピーし、認証情報を設定します。
+
 ```sh
 docker compose build
 # Notion更新のみ: .env の MARKDOWN_OUTPUT_DIR は空
 # Markdownも出す: .env に MARKDOWN_OUTPUT_DIR=/output を設定
 mkdir -p output
+docker compose up -d
+```
+
+`docker compose up -d` で [Ofelia](https://github.com/mcuadros/ofelia) が常駐し、既定では毎時 `summarizer` コンテナを起動してバッチを実行します。`up` 時に compose が `summarizer` を1回起動するため、初回もバッチが走ります（`up --build` も同様）。実行が終わった `summarizer` は停止したまま（`exited`）で、次のスケジュールまで常駐しません。
+
+停止・削除:
+
+```sh
+docker compose down
+```
+
+スケジュールは `.env` の `OFELIA_SCHEDULE` で変更します（未設定なら `@hourly`）。Ofelia 0.3.x では **秒から始める 6 フィールド**の cron 式を使います（毎時0分は `0 0 * * * *`）。`@every 1m` も指定できます。5 フィールドだけ書くとエラーにならず、左に 1 つずつずれて解釈されます（先頭が秒=0、末尾の曜日は `*`）。例: `0 * * * *` は毎分、`0 3 * * *` は毎時3分（日次3:00のつもりだと意図とずれます）。ラベルは Ofelia 起動時に一度だけ読み込まれるため、変更後は `docker compose up -d` で `ofelia` を再作成してください。タイムゾーンは既存の `TIMEZONE`（既定 `Asia/Tokyo`）を Ofelia の `TZ` に流用します。
+
+ログ:
+
+```sh
+docker compose logs ofelia
+docker compose logs summarizer
+```
+
+`ofelia` は `/var/run/docker.sock` をマウントして Docker API でコンテナを起動します。`:ro` でも API 経由では実質ホストの root 相当の操作が可能です。信頼できる環境でのみ利用してください。
+
+バッチ実行中に `docker compose up -d --build`（`summarizer` の再作成）や `docker compose down` を行うと、処理は途中で止まります。LLM 呼び出し後に Notion 書き込み前だった記事は費用が無駄になることがあります。操作前に `docker compose ps` で `summarizer` が実行中でないことを確認してください。
+
+手動で1回だけ実行する場合（定期実行とは別コンテナのため Ofelia の `no-overlap` 対象外）:
+
+```sh
 docker compose run --rm summarizer
 ```
 
 `HOST_OUTPUT_DIR` でホスト側の出力先を指定できます。コンテナはUID 10001で実行するため、Linuxではマウント先の書き込み権限を用意してください。コンテナにAPIキーをコピーせず、実行時の環境変数で渡します。
 
-cronで毎時実行する例（パスとDockerのパスは環境に合わせて変更）：
+常駐コンテナを置きたくない場合は、ホストの cron から毎時 `docker compose run --rm summarizer` を実行する方法も使えます（パスは環境に合わせて変更）:
 
 ```cron
 0 * * * * cd /path/to/notion-webclip-summarizer && /usr/local/bin/docker compose run --rm summarizer >> /path/to/webclip.log 2>&1
@@ -97,7 +126,7 @@ cronで毎時実行する例（パスとDockerのパスは環境に合わせて�
 
 ローカルとCloud Runで同じNotion連携を使う場合は、実行スケジュールをずらすとAPIアクセスの集中による429を避けやすくなります。
 
-実行の重複を避けてください。バッチ間の分散ロックは実装していないため、同時実行すると同じ記事の要約費用が重複する可能性があります。ローカルでは `flock` 等、クラウドでは実行時間より長い間隔を設定してください。終了コードは全成功/対象なしで0、記事・出力・初期化の失敗で1です。
+実行の重複を避けてください。バッチ間の分散ロックは実装していないため、同時実行すると同じ記事の要約費用が重複する可能性があります。Ofelia の `no-overlap` は compose で管理する `summarizer` コンテナの定期起動にだけ効き、`docker compose run` とは重なり得ます。手動実行と定期実行が重ならないよう注意し、ホスト cron を使う場合は `flock` 等も検討してください。クラウドでは実行時間より長い間隔を設定してください。終了コードは全成功/対象なしで0、記事・出力・初期化の失敗で1です。
 
 ## Cloud Run Jobs
 
