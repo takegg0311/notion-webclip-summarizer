@@ -97,7 +97,7 @@ docker compose up -d
 docker compose down
 ```
 
-スケジュールは `.env` の `OFELIA_SCHEDULE` で変更します（未設定なら `@hourly`）。Ofelia 0.3.x では **秒から始める 6 フィールド**の cron 式を使います（毎時0分は `0 0 * * * *`）。`@every 1m` も指定できます。5 フィールドだけ書くとエラーにならず **毎分実行** になるため注意してください。ラベルは Ofelia 起動時に一度だけ読み込まれるため、変更後は `docker compose up -d` で `ofelia` を再作成してください。タイムゾーンは既存の `TIMEZONE`（既定 `Asia/Tokyo`）を Ofelia の `TZ` に流用します。
+スケジュールは `.env` の `OFELIA_SCHEDULE` で変更します（未設定なら `@hourly`）。Ofelia 0.3.x では **秒から始める 6 フィールド**の cron 式を使います（毎時0分は `0 0 * * * *`）。`@every 1m` も指定できます。5 フィールドだけ書くとエラーにならず、左に 1 つずつずれて解釈されます（先頭が秒=0、末尾の曜日は `*`）。例: `0 * * * *` は毎分、`0 3 * * *` は毎時3分（日次3:00のつもりだと意図とずれます）。ラベルは Ofelia 起動時に一度だけ読み込まれるため、変更後は `docker compose up -d` で `ofelia` を再作成してください。タイムゾーンは既存の `TIMEZONE`（既定 `Asia/Tokyo`）を Ofelia の `TZ` に流用します。
 
 ログ:
 
